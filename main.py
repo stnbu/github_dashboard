@@ -2,10 +2,17 @@
 
 import os
 import sys
+
+# FIXME
+# beautiful HACK until I get some stuff figured out.
+sys.path.insert(0, '../mutils')
+
 import time
 import tempfile
 import re
 import requests
+import datetime
+import pytz
 import json
 import urllib
 from requests.auth import HTTPBasicAuth
@@ -17,37 +24,16 @@ from dateutil.parser import parse as parse_dt
 import daemon
 import daemon.pidfile
 
+from mutils import rest
+
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 
-# # syslog... this is not working. cannot set LEVEL. only see warn+
-# kwargs = {}
-# if os.path.exists('/var/run/syslog'):
-#     kwargs['address'] = '/var/run/syslog'
-# syslog_handler = logging.handlers.SysLogHandler(**kwargs)
-# syslog_handler.setLevel(logging.DEBUG)
-# logger.addHandler(syslog_handler)
-
 def rr(location, query='', auth=None):
-    """request+response -- given a location and query, just return the (json) data.
-    Handle errors appropriately.
-    """
+    url = urllib.parse.urlunparse(('https', 'api.github.com', location, '', query, ''))
+    return rest.get_json(url, auth=auth)
 
-    location = '/' + location.lstrip('/')
-
-    url = urllib.parse.urlparse(urllib.parse.urlunparse(
-        ('https', 'api.github.com', location, '', query, '')
-    )).geturl()
-
-    logger.debug('trying to get {}'.format(url))
-    response = requests.get(url, auth=auth)
-    
-    if response.status_code != 200:
-        logger.error('when getting {}: {}'.format(url, response.reason))
-        raise Exception(response.reason)
-    return response.json()
-
-def main(dir_path):
+def main(dir_path, daemon=True):
     """Given a writable directory `dir_path`, get interesting, recent repo data from github
 
     A file called `API_AUTH` containing a string `username:auth_token` is expectied to exist. `username` is used both
@@ -68,12 +54,21 @@ def main(dir_path):
     username, api_token = open(api_auth_file).read().strip().split(':')
     auth = HTTPBasicAuth(username, api_token)
     data_file = os.path.join(dir_path, 'repos.json')
-    
+
     while True:
         data = rr('/users/{username}/repos'.format(username=username), auth=auth)
         public_repos = [r for r in data if not r['private']]
         repos = sorted(public_repos, key=lambda r: parse_dt(r['updated_at']), reverse=True)[:5]
         logger.debug('got {} repo records'.format(len(repos)))
+        now = datetime.datetime.now(tz=pytz.UTC)
+        since = now - datetime.timedelta(days=365)
+        since = since.strftime('%Y-%m-%dT%H:%M:%SZ')
+        for i, repo in enumerate(repos):
+            url = '/repos/{username}/{repo}/commits'.format(username=username, repo=repo['name'])
+            query = 'since={since}'.format(since=since)
+            commits = rr(url, query=query, auth=auth)
+            logger.debug('got {} commits for repo {}'.format(len(commits), repo['name']))
+            repos[i]['commits'] = commits
         with tempfile.NamedTemporaryFile(mode='w', dir='/tmp', delete=False) as f:
             logger.debug('writing out data to temp file {}'.format(f.name))
             json.dump(repos, f)
@@ -85,14 +80,6 @@ def main(dir_path):
 
 if __name__ == '__main__':
 
-    script_name, dir_path = sys.argv
+    from mutils.simple_daemon import daemonize
 
-    logger.debug('starting daemon {} using path {}'.format(script_name, dir_path))
-    
-    with daemon.DaemonContext(
-            working_directory=dir_path,
-            pidfile=daemon.pidfile.PIDLockFile(os.path.join(dir_path, 'pid')),
-            
-    ):
-        main(dir_path)
-    
+    daemonize(main)
