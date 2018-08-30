@@ -110,6 +110,9 @@ class GithubFeed(object):
             commit_data = {}
             # TODO: how are they ordered? Get the most recent...
             for commit in commits:
+                existing_commit = session.query(self.commits).filter_by(sha=commit['sha']).first()
+                if existing_commit:
+                    continue
                 commit_data['repo'] = repo['name']
                 commit_data['sha'] = commit['sha']
                 commit_data['commit_message'] = commit['commit']['message']
